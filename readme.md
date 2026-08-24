@@ -212,4 +212,4 @@ output/building_blocks_output/
 ```
 
 ### 3.5. pretrained_weights
-This folder contains pretrained model weights for different pipeline components. Click here to download.
+This folder contains pretrained model weights for different pipeline components. Click https://drive.google.com/drive/folders/1fJUkb1jj_YmGuyJoEbE6d9A6biy5IKAf?usp=sharing to download.

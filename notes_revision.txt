@@ -1,0 +1,8 @@
+1. percentage of urban/city maps, scale larger than 1:10k (7970 urban + low density urban 20000 out of 100000 -> 20% Remi's dissertation, already removed the time series..... expensive to annotate) 
+2. percentage of time series data
+3. other city map series, geo-referenced and annotated like London
+so we show 1) generalizability to other city maps (similar scale) 2) generalizability to other scales (topographic maps), but the pipeline should be changed. 3) generalizability across map styles 
+
+London: 2 timestamps (Scotland has digitized it in the library) we have vectorization
+maps.nls.uk, town maps of london
+Lausanne: georeferenced maps 

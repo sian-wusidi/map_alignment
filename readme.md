@@ -1,11 +1,12 @@
+<div align="center">
 
-# Deep learning enables urban change profiling through alignment of historical maps
+# Deep Learning Enables Urban Change Profiling Through Alignment of Historical Maps
+
+**Sidi Wu** · **Yizi Chen** · **Maurizio Gribaudi** · **Konrad Schindler** · **Clément Mallet** · **Julien Perret** · **Lorenz Hurni**
 
 </div>
 
-<h4 align="center">
-Sidi Wu, Yizi Chen, Maurizio Gribaudi, Konrad Schindler, Clément Mallet, Julien Perret, Lorenz Hurni
-</h4>
+---
 
 
 ## Project Structure and Data Description

@@ -75,51 +75,6 @@ def reconstruct_from_patches(patches_images, patch_size, step_size, image_size_2
     return img[step_size//2:-(patch_size+step_size//2),step_size//2:-(patch_size+step_size//2),...]
 
 
-# def reconstruct_from_patches_blend(patches_images, patch_size, step_size, image_size_2d, image_dtype):
-#     '''Adjust to take patch images directly.
-#     patch_size is the size of the tiles
-#     step_size should be patch_size//2
-#     image_size_2d is the size of the original image
-#     image_dtype is the data type of the target image
-
-#     Most of this could be guessed using an array of patches
-#     (except step_size but, again, it should be should be patch_size//2)
-#     '''
-#     i_h, i_w = np.array(image_size_2d[:2]) + (patch_size, patch_size)
-#     p_h = p_w = patch_size
-    
-#     if len(patches_images.shape) == 4:
-#         img = np.ones((i_h+p_h//2, i_w+p_w//2, 3), dtype=image_dtype)*(-1)
-#     else:
-#         img = np.ones((i_h+p_h//2, i_w+p_w//2), dtype=image_dtype)*(-1)
-
-#     numrows = (i_h)//step_size-1
-#     numcols = (i_w)//step_size-1
-#     expected_patches = numrows * numcols
-#     if len(patches_images) != expected_patches:
-#         raise ValueError(f"Expected {expected_patches} patches, got {len(patches_images)}")
-
-#     patch_offset = step_size//2
-#     patch_inner = patch_size #p_h-step_size
-#     global_idx = 0
-#     for row in range(numrows):
-#         for col in range(numcols):
-#             tt = patches_images[row*numcols+col]
-#             # tt_roi = tt[patch_offset:-patch_offset,patch_offset:-patch_offset]
-#             tt_roi = tt.copy()
-#             numer_instance = np.unique(tt_roi[tt_roi != -1])
-#             tt_roi[tt_roi != -1] = tt_roi[tt_roi != -1] + global_idx    
-#             # img[row*step_size:row*step_size+patch_inner,
-#             #     col*step_size:col*step_size+patch_inner] = tt_roi # +1?? 
-#             img[row*step_size:row*step_size+patch_inner,
-#                 col*step_size:col*step_size+patch_inner] = blend_tiles(img[row*step_size:row*step_size+patch_inner,
-#                 col*step_size:col*step_size+patch_inner], tt_roi, row, col)
-#             global_idx += numer_instance.shape[0]
-#             # if (row == 1 or row == 2 or row == 3) and (col == 0 or col == 1 or col == 2):
-#             #     pdb.set_trace()
-
-#     # return img[step_size//2:-(patch_size+step_size//2),step_size//2:-(patch_size+step_size//2),...]
-#     return img[step_size:-patch_size,step_size:-patch_size,...]
 
 def reconstruct_from_patches_blend(patches_images, patch_size, step_size, image_size_2d, image_dtype, reverse=False):
     '''Adjust to take patch images directly.
@@ -181,80 +136,84 @@ def reconstruct_from_patches_blend(patches_images, patch_size, step_size, image_
                                         col*step_size:col*step_size+patch_size][instance_mask]= global_id
     return img[step_size:-patch_size,step_size:-patch_size,...]
 
-def reconstruct_from_patches_blend_margins(patches_images, patch_size, step_size, image_size_2d, image_dtype, patch_offset=20):
-    '''Adjust to take patch images directly.
-    patch_size is the size of the tiles
-    step_size should be patch_size//2
-    image_size_2d is the size of the original image
-    image_dtype is the data type of the target image
+def _best_match(region, mask, iou_threshold):
+    '''Lines 13 / 16: the instance id in `region` with the highest IoU with `mask`,
+    if that IoU > iou_threshold; otherwise None. Background (0) and unwritten (-1)
+    pixels are never candidates.'''
+    best_id, best_iou = None, iou_threshold
+    for cand in np.unique(region[region > 0]):
+        cand_mask = region == cand
+        union = np.logical_or(cand_mask, mask).sum()
+        score = np.logical_and(cand_mask, mask).sum() / union if union else 0.0
+        if score > best_iou:
+            best_id, best_iou = int(cand), score
+    return best_id
 
-    Most of this could be guessed using an array of patches
-    (except step_size but, again, it should be should be patch_size//2)
+
+def reconstruct_from_patches_blend(patches_images, patch_size, step_size, image_size_2d,
+                                   image_dtype=np.int32, iou_threshold=0.1):
+    '''Algorithm 1: stitching instance predictions across overlapping tiles.
+
+    Patches: (N, s, s) label tiles, -1 = unknown, 0 = background, 1+ = local ids.
+    Patches are taken from the image padded by step_size on the top/left, row-major.
+    Returns I (h, w): 0 = background, positive = global instance ids. Ids are not
+    necessarily consecutive, since merged ids (line 19) leave gaps.
     '''
-    i_h, i_w = np.array(image_size_2d[:2]) + (patch_size, patch_size)
-    p_h = p_w = patch_size
-    
-    if len(patches_images.shape) == 4:
-        img = np.ones((i_h+p_h//2, i_w+p_w//2, 3), dtype=image_dtype)*(-1)
-    else:
-        img = np.ones((i_h+p_h//2, i_w+p_w//2), dtype=image_dtype)*(-1)
+    if patches_images.ndim != 3:
+        raise ValueError("instance stitching expects (N, H, W) label patches")
+    h, w = int(image_size_2d[0]), int(image_size_2d[1])
+    s, t = patch_size, step_size
+    o = s - t                                                   # overlap
 
-    numrows = (i_h)//step_size-1
-    numcols = (i_w)//step_size-1
-    expected_patches = numrows * numcols
-    if len(patches_images) != expected_patches:
-        raise ValueError(f"Expected {expected_patches} patches, got {len(patches_images)}")
+    # Line 3. The canvas is padded, so r and c count tiles over the padded size.
+    # int64 internally: needs -1, and avoids overflow; cast to image_dtype at the end.
+    i_h, i_w = h + s, w + s
+    I = np.full((i_h + s // 2, i_w + s // 2), -1, dtype=np.int64)
+    r = i_h // t - 1
+    c = i_w // t - 1
+    g = 1
+    if len(patches_images) != r * c:
+        raise ValueError(f"Expected {r * c} patches, got {len(patches_images)}")
 
-    overlap = step_size #p_h-step_size
-    global_id_counter = 1
-    global_id = 0
-    for row in range(numrows):
-        # if row%2 == 0:
-        #     col_range = range(numcols)
-        # else:
-        #     col_range = range(numcols-1, -1, -1)
-        for col in range(numcols):
-            tt = patches_images[row*numcols+col]
-            if patch_offset > 0:
-                tt_roi = tt[patch_offset:-patch_offset,patch_offset:-patch_offset].copy()
-            else:
-                tt_roi = tt.copy()  # tile mask
-            instance_ids = np.unique(tt_roi[tt_roi != -1]) #
+    for i in range(r):                                          # line 4
+        for j in range(c):                                      # line 5
+            p = patches_images[i * c + j]                       # line 6
+            L = np.unique(p[p > 0])                             # line 7
 
-            for local_id in instance_ids:
-                instance_mask = (tt_roi == local_id)
-                # matched = False
-                best_match_id = None
-                
-                if row > 0:
-                    overlap_region = img[row*step_size+patch_offset:row*step_size+overlap-patch_offset,
-                                        col*step_size+patch_offset:col*step_size+patch_size-patch_offset]
-                    overlap_instance_ids = np.unique(overlap_region[overlap_region != -1])  #
-                    best_match_id = find_best_match(overlap_instance_ids, overlap_region, instance_mask[:overlap-2*patch_offset,:], 0.1)
+            for l in L:                                         # line 8
+                M = p == l                                      # line 9
+                id_u = id_l = None                              # line 10
 
-                if col > 0 and best_match_id is None:
-                    overlap_region = img[row*step_size+patch_offset:row*step_size+patch_size-patch_offset,
-                                        col*step_size+patch_offset:col*step_size+overlap-patch_offset]
-                    overlap_instance_ids = np.unique(overlap_region[overlap_region != -1]) #   
-                    best_match_id = find_best_match(overlap_instance_ids, overlap_region, instance_mask[:,:overlap-2*patch_offset], 0.1)
+                if i > 0:                                       # lines 11-13
+                    R_u = I[i * t:i * t + o, j * t:j * t + s]
+                    id_u = _best_match(R_u, M[:o, :], iou_threshold)
 
-                if best_match_id is not None:
-                    if len(best_match_id) == 1:
-                        global_id = best_match_id[0]
-                    else:
-                        global_id = best_match_id[0] if -1 in best_match_id else global_id_counter
-                        global_id_counter += 1
-                        img[(img == best_match_id[0]) | (img == best_match_id[1])] = global_id
-                else:
-                    global_id = global_id_counter
-                    global_id_counter += 1
+                if j > 0:                                       # lines 14-16
+                    R_l = I[i * t:i * t + s, j * t:j * t + o]
+                    id_l = _best_match(R_l, M[:, :o], iou_threshold)
 
-                
-                img[row*step_size+patch_offset:row*step_size+patch_size-patch_offset,
-                                        col*step_size+patch_offset:col*step_size+patch_size-patch_offset][instance_mask]= global_id
-                
-    return img[step_size+patch_offset:-(patch_size+patch_offset),step_size+patch_offset:-(patch_size+patch_offset),...]
+                if id_u is not None and id_l is not None and id_u != id_l:   # line 17
+                    id_ = min(id_u, id_l)                       # line 18
+                    I[I == max(id_u, id_l)] = id_               # line 19
+                elif id_u is not None:                          # lines 20-21
+                    id_ = id_u
+                elif id_l is not None:                          # lines 22-23
+                    id_ = id_l
+                else:                                           # lines 24-26
+                    id_ = g
+                    g += 1
 
+                # Line 27: write id_ without overwriting another instance.
+                # Background (0) committed by an earlier tile's line 28 is not an
+                # instance, so it may be overwritten.
+                tile = I[i * t:i * t + s, j * t:j * t + s]      # view into I
+                tile[M & (tile <= 0)] = id_
+
+            tile = I[i * t:i * t + s, j * t:j * t + s]          # line 28
+            tile[tile == -1] = 0
+
+    I = I[t:t + h, t:t + w]                                     # remove padding
+    return I.astype(image_dtype)      
 
 def stitch_predictions(patches_images, patch_size, step_size, image_size_2d, image_dtype, patch_offset):
     i_h, i_w = np.array(image_size_2d[:2]) + (patch_size, patch_size)
